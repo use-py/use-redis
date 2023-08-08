@@ -1,4 +1,5 @@
 import logging
+import threading
 
 import redis
 import time
@@ -65,8 +66,19 @@ class RedisStore:
             del self.state.connection
 
 
-class RedisStreamMixin:
-    connection: redis.Redis
+class RedisStreamStore(RedisStore):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.__shutdown = False
+        self.__shutdown_event = threading.Event()
+
+    def __del__(self):
+        self.shutdown()
+
+    def shutdown(self):
+        self.__shutdown = True
+        self.__shutdown_event.set()
 
     def _create_group(self, stream, group):
         try:
@@ -90,8 +102,12 @@ class RedisStreamMixin:
 
     def start_consuming(self, stream, group, consumer, callback, prefetch=1, **kwargs):
         """开始消费"""
+        self.__shutdown = False
+        self.__shutdown_event.clear()
         self._create_group(stream, group)
-        while True:
+        while not self.__shutdown:
+            if self.__shutdown:
+                break
             try:
                 messages = self.connection.xreadgroup(group, consumer, {stream: '>'}, count=prefetch, **kwargs)
                 for message in messages:
@@ -105,10 +121,6 @@ class RedisStreamMixin:
                 logger.exception(f"RedisStore consume error<{e}>, reconnecting...")
                 del self.connection
                 time.sleep(1)
-
-
-class RedisStreamStore(RedisStore, RedisStreamMixin):
-    pass
 
 
 useRedis = RedisStore
