@@ -14,7 +14,7 @@ jobs:
         python-version: [ "3.8", "3.9", "3.10" ]
     runs-on: ${{ matrix.os }}
     services:
-      rabbitmq:
+      redis:
         image: redis:latest
         options: >-
           --health-cmd "redis-cli ping"
