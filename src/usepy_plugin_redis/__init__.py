@@ -36,9 +36,9 @@ class RedisStore:
         while attempts <= MAX_CONNECTION_ATTEMPTS:
             try:
                 connector = redis.Redis(**self.parameters)
+                connector.ping()
                 if attempts > 1:
                     logger.warning(f"RedisStore connection succeeded after {attempts} attempts", )
-                connector.ping()
                 return connector
             except redis.ConnectionError as exc:
                 logger.warning(f"RedisStore connection error<{exc}>; retrying in {delay} seconds")
