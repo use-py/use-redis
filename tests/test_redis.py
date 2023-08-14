@@ -7,7 +7,7 @@ from usepy_plugin_redis import useRedisStreamStore
 
 @pytest.fixture
 def redis():
-    return useRedisStreamStore()
+    return useRedisStreamStore(stream='test_stream')
 
 
 def test_connection(redis):
