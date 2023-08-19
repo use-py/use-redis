@@ -7,19 +7,18 @@ import time
 from .store import RedisStore
 
 MAX_SEND_ATTEMPTS = 6  # 最大发送重试次数
-MAX_CONNECTION_ATTEMPTS = float('inf')  # 最大连接重试次数
-MAX_CONNECTION_DELAY = 2 ** 5  # 最大延迟时间
 
 logger = logging.Logger(__name__)
 
 
 class RedisStreamStore(RedisStore):
 
-    def __init__(self, stream_name, group_name, *args, **kwargs):
+    def __init__(self, stream_name, group_name=None, consumer_name=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.__shutdown = False
         self.stream_name = stream_name
-        self.group_name = group_name
+        self.group_name = group_name or 'default_group'
+        self.consumer_name = consumer_name or str(uuid.uuid4())
 
     def __del__(self):
         self.shutdown()
@@ -31,8 +30,6 @@ class RedisStreamStore(RedisStore):
         self.state.group_start_id = kwargs.get('group_start_id',
                                                '0-0')  # 消费组起始ID，默认为0（从头开始消费），可设置为'$'（从最新消息开始消费），或者指定合法的消息ID
         self._create_group()
-
-        self.state.consumer = kwargs.get('consumer', str(uuid.uuid4()))
 
         self.state.xclaim_interval = kwargs.get('xclaim_interval', 300000)  # xclaim 间隔时间，单位毫秒，默认 5 分钟
         self.state.xclaim_last_time = 0
@@ -70,7 +67,7 @@ class RedisStreamStore(RedisStore):
         # xclaim
         if self._is_need_xclaim():
             self.state.xclaim_start_id, messages, _ = self.connection.xautoclaim(
-                self.state.stream, self.state.group, self.state.consumer,
+                self.stream_name, self.group_name, self.consumer_name,
                 min_idle_time=self.state.timeout,
                 start_id=self.state.xclaim_start_id,
                 count=count
@@ -89,10 +86,9 @@ class RedisStreamStore(RedisStore):
 
         return result
 
-    def start_consuming(self, stream_name, callback, prefetch=1, timeout=3600000, **kwargs):
+    def start_consuming(self, callback, prefetch=1, timeout=3600000, **kwargs):
         """开始消费
 
-        :param stream_name: steam 名称
         :param callback: 消费回调函数
         :param prefetch: 预取消息数量
         :param timeout: steam 的消息 pending 超时时间，默认为 1 小时

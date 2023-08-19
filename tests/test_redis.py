@@ -7,7 +7,7 @@ from usepy_plugin_redis import useRedisStreamStore
 
 @pytest.fixture
 def redis():
-    return useRedisStreamStore(stream='test_stream')
+    return useRedisStreamStore(stream_name='test_stream')
 
 
 def test_connection(redis):
@@ -41,4 +41,4 @@ def test_consumer(redis):
         assert _message == send_message
         redis.shutdown()
 
-    threading.Thread(target=redis.start_consuming, args=(stream, 'test_group', 'test_consumer', callback)).start()
+    threading.Thread(target=redis.start_consuming, args=(callback,)).start()
