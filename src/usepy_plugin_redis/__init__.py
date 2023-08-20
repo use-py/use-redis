@@ -1,10 +1,12 @@
-from .store import RedisStore
-from .stream import RedisStreamStore
+from .store import RedisStore as useRedis
+from .stream import RedisStreamStore as useRedisStream
+from .lock import Lock as useRedisLock
 
-useRedis = RedisStore
-useRedisStreamStore = RedisStreamStore
+useRedisStreamStore = useRedisStream
 
 __all__ = [
     "useRedis",
-    "useRedisStreamStore"
+    "useRedisStreamStore",
+    "useRedisStream",
+    "useRedisLock"
 ]
