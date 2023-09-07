@@ -19,11 +19,12 @@ class RedisStore:
         :param password: Redis password
         :param kwargs: Redis parameters
         """
-        self.__shutdown = False
+        self._shutdown = False
         self.parameters = {
             'host': host or 'localhost',
             'port': port or 6379,
             'password': password or None,
+            'decode_responses': True,
         }
         if kwargs:
             self.parameters.update(kwargs)
@@ -62,7 +63,7 @@ class RedisStore:
             self._connection = None
 
     def shutdown(self):
-        self.__shutdown = True
+        self._shutdown = True
         del self.connection
 
     def __del__(self):
