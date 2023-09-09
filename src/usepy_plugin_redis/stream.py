@@ -1,129 +1,239 @@
+import json
 import logging
-import uuid
+import threading
+import time
+from typing import Optional, List, Union, Callable
 
 import redis
-import time
 
 from .store import RedisStore
 
-MAX_SEND_ATTEMPTS = 6  # 最大发送重试次数
+logger = logging.getLogger(__name__)
 
-logger = logging.Logger(__name__)
+
+class RedisStreamMessage:
+    """
+    A message from the Redis stream.
+    """
+    
+    def __init__(self, id, body, stream, group):
+        self.stream = stream
+        self.group = group
+        self.id = id
+        self.body = body
+    
+    @staticmethod
+    def from_xread(raw_messages, *, group):
+        """
+        Parse a raw message from the Redis stream xread[group] respond.
+        """
+        # xread = [['test_consumer_stream', [('1693561850564-0', {'foo': 'bar'}), ('1693561905479-0', {'foo': 'bar'})]]]
+        
+        if not group:
+            raise ValueError("group is required")
+        
+        result = []
+        for stream, messages in raw_messages:
+            result.extend(RedisStreamMessage(id, body, stream, group) for id, body in messages)
+        
+        return result
+    
+    @staticmethod
+    def from_xclaim(raw_messages, *, stream, group):
+        """
+        Parse a raw message from the Redis stream xclaim respond.
+        """
+        # xclaim = [('1693561850564-0', {'foo': 'bar'}), ('1693561905479-0', {'foo': 'bar'})]
+        
+        if not stream:
+            raise ValueError("stream is required")
+        if not group:
+            raise ValueError("group is required")
+        
+        return [RedisStreamMessage(id, body, stream, group) for id, body in raw_messages]
+    
+    def to_dict(self):
+        return {k: v for k, v in self.__dict__.items() if not k.startswith('_')}
+    
+    def to_json(self):
+        return json.dumps(self.to_dict())
+    
+    def __str__(self):
+        return self.to_json()
+    
+    def __repr__(self):
+        return f"RedisStreamMessage({self.stream}, {self.group}, {self.id}, {self.body})"
 
 
 class RedisStreamStore(RedisStore):
+    
+    def __init__(
+            self,
+            *,
+            stream: str,
+            group: str,
+            stream_max_entries: int = 0,
+            redeliver_timeout: int = 60000,
+            claim_interval: int = 1800000,
+            **kwargs
+    ):
+        """
+        
+        A Redis stream store.
+        
+        :param stream: The name of the stream.
+        :param group: The name of the group.
+        :param stream_max_entries: any value higher than 0 defines an approximate maximum number of stream entries
+        :param redeliver_timeout: Timeout before redeliver messages still in pending state (seconds)
+        :param claim_interval: Interval by which pending/abandoned messages should be checked
 
-    def __init__(self, stream_name, group_name=None, consumer_name=None, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.__shutdown = False
-        self.stream_name = stream_name
-        self.group_name = group_name or 'default_group'
-        self.consumer_name = consumer_name or str(uuid.uuid4())
-
-    def __del__(self):
-        self.shutdown()
-
-    def shutdown(self):
-        self.__shutdown = True
-
-    def _init_consume(self, prefetch, timeout, **kwargs):
-        self.state.group_start_id = kwargs.get('group_start_id',
-                                               '0-0')  # 消费组起始ID，默认为0（从头开始消费），可设置为'$'（从最新消息开始消费），或者指定合法的消息ID
-        self._create_group()
-
-        self.state.xclaim_interval = kwargs.get('xclaim_interval', 300000)  # xclaim 间隔时间，单位毫秒，默认 5 分钟
-        self.state.xclaim_last_time = 0
-        self.state.xclaim_start_id = '0-0'
-
-        self.state.timeout = timeout or 3600000  # steam 的 消息 pending 超时时间，默认为 1 小时
-        self.state.prefetch = prefetch or 1  # 默认预取 1 条消息
-
-    def _create_group(self):
+        """
+        super().__init__(**kwargs)
+        self.stream = stream
+        self.group = group
+        self.max_entries = stream_max_entries if stream_max_entries > 0 else None
+        self.redeliver_timeout = redeliver_timeout
+        self.claim_interval = claim_interval
+        
+        self._auto_setup = True
+        self.state = threading.local()
+    
+    def _setup(self):
         try:
-            self.connection.xgroup_create(self.stream_name, self.group_name, id=self.state.group_start_id,
-                                          mkstream=True)
+            self.connection.xgroup_create(self.stream, self.group, id="0", mkstream=True)
         except redis.exceptions.ResponseError as e:
             if "already exists" not in str(e):
                 raise e
-
-    def _is_need_xclaim(self):
-        """判断是否需要 xclaim"""
-        return time.time() * 1000 - self.state.xclaim_last_time > self.state.xclaim_interval
-
-    def _consume(self):
-        """消费消息，返回消息列表"""
-        # 获取 未ACK 消息数量
-        pending = self.connection.xpending_range(
-            self.stream_name, self.group_name,
-            count=self.state.prefetch, idle=0,
-            consumername=self.state.consumer
-        )
-        # 计算需获取的消息数量
-        count = self.state.prefetch - len(pending) if pending else len(pending)
-        if count <= 0:
-            return []
-
-        result = []
-        # xclaim
-        if self._is_need_xclaim():
-            self.state.xclaim_start_id, messages, _ = self.connection.xautoclaim(
-                self.stream_name, self.group_name, self.consumer_name,
-                min_idle_time=self.state.timeout,
-                start_id=self.state.xclaim_start_id,
-                count=count
-            )
-            if messages:
-                result.extend(messages)
-            self.state.xclaim_last_time = time.time() * 1000
-        # xreadgroup
-        if len(result) < count:
-            messages = self.connection.xreadgroup(
-                self.state.group, self.state.consumer, {self.state.stream: '>'},
-                count=count - len(result)
-            )
-            if messages:
-                result.extend(messages)
-
-        return result
-
-    def start_consuming(self, callback, prefetch=1, timeout=3600000, **kwargs):
-        """开始消费
-
-        :param callback: 消费回调函数
-        :param prefetch: 预取消息数量
-        :param timeout: steam 的消息 pending 超时时间，默认为 1 小时
-        :param kwargs: 其他参数，详见源码 _init_consumer 方法
+        
+        self._auto_setup = False
+    
+    def send(self, message: dict):
         """
-        self.__shutdown = False
-        # self._init_consume(stream_name=stream_name, prefetch=prefetch, timeout=timeout, **kwargs)
-
-        while not self.__shutdown:
+        Send a message to the Redis stream.
+        """
+        if self._auto_setup:
+            self._setup()
+        return self.connection.xadd(self.stream, message, maxlen=self.max_entries)
+    
+    def claim_old_pending_messages(
+            self, consumer: str,
+            count: int,
+            min_idle_time: int
+    ) -> Optional[List[RedisStreamMessage]]:
+        """
+        Claim messages from the Redis stream.
+        """
+        # https://redis.io/commands/xautoclaim/
+        # 在迭代 PEL 时，如果偶然发现流中不再存在的消息（由 修剪 XDEL 或删除），它不会声明它 XAUTOCLAIM ，而是将其从找到它的 PEL 中删除。
+        # 此功能在 Redis 7.0 中引入。这些消息 ID 作为回复的一部分 XAUTOCLAIM 返回给调用方。
+        _, messages, _ = self.connection.xautoclaim(
+            name=self.stream,
+            groupname=self.group,
+            consumername=consumer,
+            min_idle_time=min_idle_time,
+            start_id="0",
+            count=count
+        )
+        logger.debug(f"xautoclaim: {messages=}")
+        
+        self.state.next_claim = time.time() * 1000 + self.claim_interval
+        
+        if messages:
+            return RedisStreamMessage.from_xclaim(raw_messages=messages, stream=self.stream, group=self.group)
+    
+    def get(self, consumer: str, count: int = 1, block: Union[int, None] = None) -> Optional[List[RedisStreamMessage]]:
+        """
+        Read new messages from the Redis stream without claim.
+        """
+        if self._auto_setup:
+            self._setup()
+        
+        raw_messages = self.connection.xreadgroup(
+            groupname=self.group,
+            consumername=consumer,
+            streams={self.stream: ">"},
+            count=count,
+            block=block
+        )
+        logger.debug(f"xreadgroup: {raw_messages=}")
+        if raw_messages:
+            return RedisStreamMessage.from_xread(raw_messages=raw_messages, group=self.group)
+    
+    def consume(
+            self,
+            consumer: str,
+            prefetch: int = 1,
+            timeout: Union[int, None] = None,
+            force_claim: bool = False,
+            redeliver_timeout: Union[int, None] = None
+    ) -> Optional[List[RedisStreamMessage]]:
+        
+        """
+        Consume messages from the Redis stream(order: xclaim -> xreadgroup).
+        
+        :param consumer: The name of the consumer
+        :param prefetch: Number of prefetches
+        :param timeout: Blocking time of the Xread. Unit is millisecond, 0 is infinite blocking
+        :param force_claim: Whether to force claim, True= to perform claim, False = execute claim periodically
+        :param redeliver_timeout: Timeout before redeliver messages still in pending state (seconds)
+        :return: List of messages consumed. If consumption fails, return []
+        """
+        
+        # 获取 当前消费者尚未ACK 的消息，最多获取  prefetch 个
+        pending_messages = self.connection.xpending_range(self.stream, self.group, '-', '+', prefetch, consumer, 0)
+        # 计算需获取的消息数量
+        need_count = prefetch - len(pending_messages) if pending_messages else prefetch
+        if need_count <= 0:
+            return []
+        
+        result = []
+        # 先尝试 xclaim
+        if force_claim or getattr(self.state, "next_claim", 0) <= time.time() * 1000:
+            pending_messages = self.claim_old_pending_messages(
+                consumer=consumer,
+                count=need_count,
+                min_idle_time=redeliver_timeout or self.redeliver_timeout
+            )
+            if pending_messages:
+                result.extend(pending_messages)
+                need_count = need_count - len(result)  # 更新还需获取的消息数量
+        
+        # 然后 xreadgroup
+        if need_count > 0:
+            messages = self.get(consumer, need_count, timeout)
+            if messages:
+                result.extend(messages)
+        
+        return result
+    
+    def start_consuming(self, consumer: str, callback: Callable, prefetch: int = 1, timeout: int = 1000, **kwargs):
+        """
+        Start consuming messages from the Redis stream.
+        
+        :param consumer: The name of the consumer，please use a unique value
+        :param callback: Callback function
+        :param prefetch: Number of prefetches
+        :param timeout: Blocking time of the Xread. Unit is millisecond, 0 is infinite blocking
+        """
+        
+        while not self._shutdown:
             try:
-                messages = self._consume()
+                messages = self.consume(consumer, prefetch, timeout=timeout, **kwargs)
                 for message in messages:
-                    _, msg = message
-                    callback(msg)
-            except redis.ConnectionError:
-                logger.warning("RedisStore consume connection error, reconnecting...")
-                del self.connection
-                time.sleep(1)
-            except Exception as e:
-                logger.exception(f"RedisStore consume error<{e}>, reconnecting...")
-                del self.connection
-                time.sleep(1)
-            finally:
-                if self.__shutdown:
-                    break
-
-    def send(self, stream, message, **kwargs):
-        """发送消息"""
-        attempts = 1
-        while True:
-            try:
-                self.connection.xadd(stream, message, **kwargs)
-                return message
-            except Exception as exc:
-                del self.connection
-                attempts += 1
-                if attempts > MAX_SEND_ATTEMPTS:
-                    raise exc
+                    callback(message)
+            except redis.RedisError as e:
+                logger.error(f"Error consuming messages: {e}")
+                time.sleep(self.RECONNECTION_DELAY)
+    
+    def ack(self, message: RedisStreamMessage):
+        """
+        Acknowledge a message.
+        """
+        self.connection.xack(self.stream, self.group, message.id)
+    
+    def reject(self, message: RedisStreamMessage):
+        """
+        Reject a message.
+        """
+        self.connection.xack(self.stream, self.group, message.id)
+        

@@ -1,15 +1,16 @@
 import logging
-
-import redis
 import time
 
-MAX_CONNECTION_ATTEMPTS = float('inf')  # 最大连接重试次数
-MAX_CONNECTION_DELAY = 2 ** 5  # 最大延迟时间
+import redis
 
 logger = logging.Logger(__name__)
 
 
 class RedisStore:
+    MAX_SEND_ATTEMPTS = 6
+    MAX_CONNECTION_ATTEMPTS = float('inf')
+    MAX_CONNECTION_DELAY = 2 ** 5
+    RECONNECTION_DELAY = 1
 
     def __init__(self, *, host=None, port=None, password=None, **kwargs):
         """
@@ -18,10 +19,12 @@ class RedisStore:
         :param password: Redis password
         :param kwargs: Redis parameters
         """
+        self._shutdown = False
         self.parameters = {
             'host': host or 'localhost',
             'port': port or 6379,
             'password': password or None,
+            'decode_responses': True,
         }
         if kwargs:
             self.parameters.update(kwargs)
@@ -29,8 +32,8 @@ class RedisStore:
 
     def _create_connection(self):
         attempts = 1
-        delay = 1
-        while attempts <= MAX_CONNECTION_ATTEMPTS:
+        reconnection_delay = self.RECONNECTION_DELAY
+        while attempts <= self.MAX_CONNECTION_ATTEMPTS:
             try:
                 connector = redis.Redis(**self.parameters)
                 connector.ping()
@@ -38,12 +41,10 @@ class RedisStore:
                     logger.warning(f"RedisStore connection succeeded after {attempts} attempts", )
                 return connector
             except redis.ConnectionError as exc:
-                logger.warning(f"RedisStore connection error<{exc}>; retrying in {delay} seconds")
+                logger.warning(f"RedisStore connection error<{exc}>; retrying in {reconnection_delay} seconds")
                 attempts += 1
-                time.sleep(delay)
-                if delay < MAX_CONNECTION_DELAY:
-                    delay *= 2
-                    delay = min(delay, MAX_CONNECTION_DELAY)
+                time.sleep(reconnection_delay)
+                reconnection_delay = min(reconnection_delay * 2, self.MAX_CONNECTION_DELAY)
         raise redis.ConnectionError("RedisStore connection error, max attempts reached")
 
     @property
@@ -60,3 +61,10 @@ class RedisStore:
             except Exception as exc:
                 logger.exception(f"RedisStore connection close error<{exc}>")
             self._connection = None
+
+    def shutdown(self):
+        self._shutdown = True
+        del self.connection
+
+    def __del__(self):
+        self.shutdown()
