@@ -184,6 +184,7 @@ class RedisStreamStore(RedisStore):
         # 计算需获取的消息数量
         need_count = prefetch - len(pending_messages) if pending_messages else prefetch
         if need_count <= 0:
+            time.sleep(1)  # 尚未ACK的消息过多，导致本次不获取，暂停1s再试
             return []
         
         result = []
@@ -236,4 +237,3 @@ class RedisStreamStore(RedisStore):
         Reject a message.
         """
         self.connection.xack(self.stream, self.group, message.id)
-        
