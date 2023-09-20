@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "usepy-plugin-redis"
-version = "0.1.5"
+version = "0.1.6"
 description = ""
 authors = ["miclon <jcnd@163.com>"]
 readme = "README.md"
@@ -10,7 +10,7 @@ packages = [
 
 [tool.poetry.dependencies]
 python = "^3.8"
-redis = "^4.6.0"
+redis = ">=4.6.0,<6.0.0"
 
 [tool.poetry.group.test.dependencies]
 pytest = [
