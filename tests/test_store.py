@@ -1,8 +1,7 @@
 import pytest
-import redis
 from redis.exceptions import ConnectionError
 
-from usepy_plugin_redis.store import RedisStore
+from use_redis.store import RedisStore
 
 
 @pytest.fixture
@@ -25,7 +24,7 @@ def test_shutdown(redis_store):
 
 
 def test_redis_connection():
-    rds = RedisStore(host='localhost_', port=6379, db=0)
+    rds = RedisStore(host="localhost_", port=6379, db=0)
     rds.MAX_CONNECTION_ATTEMPTS = 1
     with pytest.raises(ConnectionError):
         rds.connection
