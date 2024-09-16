@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "use-redis"
-version = "0.1.9"
+version = "0.1.91"
 description = ""
 authors = ["miclon <jcnd@163.com>"]
 readme = "README.md"
